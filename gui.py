@@ -1,448 +1,832 @@
 #!/usr/bin/env python3
 """
-Cron Manager - a simple GUI to browse, create, edit and delete Hermes cron jobs.
-
-Run:  python3 gui.py
-
-Features:
-  - List all cron jobs (name, status, schedule, next run)
-  - Create a new job (friendly form: how often, what to do)
-  - Edit an existing job (name / schedule / pause-resume)
-  - Run now / Pause / Resume / Remove actions
-  - View run history
-  - Refresh on demand
-  - Auto-adapts to dark/light system theme
-
-Uses the `cronmanager` library (hermes cron CLI wrapper) from the same folder.
+Cron Manager — sleek, premium, native Linux scheduled task manager (Qt 6 / PySide6).
+Controls real Linux scheduled tasks (systemd --user timers or crontab) with zero
+third-party agent dependencies and live Omarchy theme synchronization.
 """
 
 from __future__ import annotations
 
-import subprocess
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+import sys
+from typing import Callable, Optional
+
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 
 import cronmanager as cm
+from theme import ThemePalette, ThemeWatcher, build_stylesheet
 
 
-# ---- theme detection --------------------------------------------------------
-def detect_theme() -> str:
-    """Return 'dark' or 'light' based on the desktop theme settings."""
-    try:
-        out = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if out.returncode == 0:
-            v = out.stdout.strip().strip("'")
-            if "dark" in v:
-                return "dark"
-            if "light" in v:
-                return "light"
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass
+class GlowButton(QPushButton):
+    """PushButton with smooth animated accent glow on hover and pointer cursor."""
 
-    # Fallback: read GTK settings for dark/light theme names.
-    try:
-        cfg = subprocess.run(
-            ["bash", "-c",
-             "cat ~/.config/gtk-3.0/settings.ini 2>/dev/null; "
-             "cat ~/.config/gtk-4.0/settings.ini 2>/dev/null"],
-            capture_output=True, text=True, timeout=5,
-        )
-        txt = (cfg.stdout + cfg.stderr).lower()
-        if "dark" in txt or "black" in txt or "adapta" in txt:
-            return "dark"
-    except subprocess.SubprocessError:
-        pass
+    def __init__(self, text: str = "", glow_hex: str = "#7376b7", max_blur: float = 20.0, parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._max_blur = max_blur
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setOffset(0, 0)
+        self._shadow.setBlurRadius(0.0)
+        self._set_glow_color(glow_hex)
+        self.setGraphicsEffect(self._shadow)
 
-    return "light"
+        self._anim = QPropertyAnimation(self._shadow, b"blurRadius", self)
+        self._anim.setDuration(180)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+    def _set_glow_color(self, hex_color: str) -> None:
+        c = QColor(hex_color)
+        c.setAlpha(155)
+        self._shadow.setColor(c)
 
-THEME = detect_theme()
-is_dark = THEME == "dark"
+    def update_glow_color(self, hex_color: str) -> None:
+        self._set_glow_color(hex_color)
 
-# ---- colours per theme ------------------------------------------------------
-if is_dark:
-    BG = "#242424"
-    CARD = "#2f2f2f"
-    HEADER_BG = "#1c1c1c"
-    TEXT = "#f0f0f0"
-    SUBTEXT = "#b0b0b0"
-    BORDER = "#3a3a3a"
-else:
-    BG = "#f5f6f8"
-    CARD = "#ffffff"
-    HEADER_BG = "#2d6cdf"
-    TEXT = "#1a1a1a"
-    SUBTEXT = "#555555"
-    BORDER = "#d0d0d0"
+    def enterEvent(self, event) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._shadow.blurRadius())
+        self._anim.setEndValue(self._max_blur)
+        self._anim.start()
+        super().enterEvent(event)
 
-ACCENT_TEXT = "#ffffff"
-STATUS_COLORS = {
-    "active": "#3fb25f",
-    "paused": "#e0a400",
-    "running": "#4a86e8",
-    "completed": "#808080",
-    "failed": "#d43b2f",
-    "missed": "#a05195",
-    "cancelled": "#808080",
-}
+    def leaveEvent(self, event) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._shadow.blurRadius())
+        self._anim.setEndValue(0.0)
+        self._anim.start()
+        super().leaveEvent(event)
 
 
-class CronManagerApp(tk.Tk):
-    def __init__(self) -> None:
+class HoverCard(QFrame):
+    """Elevated card with smooth animated accent glow on hover."""
+
+    def __init__(self, glow_hex: str = "#7376b7", parent=None) -> None:
+        super().__init__(parent)
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setOffset(0, 3)
+        self._shadow.setBlurRadius(10.0)
+        c = QColor(glow_hex)
+        c.setAlpha(35)
+        self._shadow.setColor(c)
+        self.setGraphicsEffect(self._shadow)
+        self._glow_hex = glow_hex
+
+        self._anim = QPropertyAnimation(self._shadow, b"blurRadius", self)
+        self._anim.setDuration(200)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def enterEvent(self, event) -> None:
+        c = QColor(self._glow_hex)
+        c.setAlpha(115)
+        self._shadow.setColor(c)
+        self._anim.stop()
+        self._anim.setStartValue(self._shadow.blurRadius())
+        self._anim.setEndValue(24.0)
+        self._anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        c = QColor(self._glow_hex)
+        c.setAlpha(35)
+        self._shadow.setColor(c)
+        self._anim.stop()
+        self._anim.setStartValue(self._shadow.blurRadius())
+        self._anim.setEndValue(10.0)
+        self._anim.start()
+        super().leaveEvent(event)
+
+
+class WorkerThread(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn: Callable, *args, **kwargs) -> None:
         super().__init__()
-        self.title("Cron Manager")
-        self.geometry("920x620")
-        self.minsize(780, 500)
-        self.configure(bg=BG)
-        self._configure_theme()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
 
-        self.jobs: list[cm.Job] = []
-        self._build_ui()
-        self.refresh()
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self._fn(*self._args, **self._kwargs))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
-    # ---- theming -----------------------------------------------------------
-    def _configure_theme(self) -> None:
-        style = ttk.Style(self)
-        available = set(style.themes()) if hasattr(style, "themes") else set()
-        for candidate in ("arc", "breeze", "clam", "highwind", "default"):
-            if candidate in available:
-                style.theme_use(candidate)
-                break
 
-    # ---- UI construction ---------------------------------------------------
-    def _build_ui(self) -> None:
-        # Title header
-        header = ttk.Frame(self, height=46)
-        header.pack(fill=tk.X, side=tk.TOP)
-        header.propagate(False)
-        ttk.Label(
-            header,
-            text="  🗓  Cron Manager",
-            foreground=ACCENT_TEXT,
-            background=HEADER_BG,
-            font=("Segoe UI", 13, "bold"),
-            anchor="w",
-        ).pack(fill=tk.BOTH, side=tk.LEFT)
+class JobFormDialog(QDialog):
+    """Human-friendly modal to create or edit a native Linux scheduled task."""
 
-        # Toolbar
-        bar = ttk.Frame(self, padding=6)
-        bar.pack(fill=tk.X, side=tk.TOP)
-        self._btn(bar, "Refresh", self.refresh)
-        self._btn(bar, "New Job", self._new_dialog)
-        self._btn(bar, "Edit", self._edit_dialog)
-        self._btn(bar, "Run Now", self.run_now)
-        self._btn(bar, "Pause/Resume", self.toggle_pause)
-        self._btn(bar, "History", self.show_history)
-        self._btn(bar, "Remove", self.remove_selected)
+    PRESETS = [
+        ("Every 5 min", "*/5 * * * *"),
+        ("Every 15 min", "*/15 * * * *"),
+        ("Every hour", "0 * * * *"),
+        ("Daily 09:00", "0 9 * * *"),
+        ("Mondays 09:00", "0 9 * * 1"),
+        ("At Startup", "@reboot"),
+    ]
 
-        # Job list
-        tree_frame = ttk.Frame(self)
-        tree_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
-        self.tree = ttk.Treeview(
-            tree_frame,
-            columns=("id", "name", "status", "schedule", "next"),
-            show="headings",
-            height=18,
+    UNIT_MAP = [
+        ("minutes", "m"),
+        ("hours", "h"),
+        ("days", "d"),
+    ]
+
+    EXAMPLES = [
+        ("Desktop Notification", 'notify-send "Cron Manager" "Time for a quick break!"'),
+        ("Backup Documents", 'tar -czf ~/Backups/docs-$(date +%F).tar.gz ~/Documents'),
+        ("Clean /tmp logs", 'find /tmp -maxdepth 1 -name "*.log" -mtime +7 -delete'),
+    ]
+
+    def __init__(
+        self,
+        parent: QWidget,
+        palette: ThemePalette,
+        job: Optional[cm.Job] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.job = job
+        self.palette_data = palette
+        self.result_payload: Optional[dict] = None
+
+        is_edit = job is not None
+        self.setWindowTitle("Edit Linux Task" if is_edit else "New Linux Task")
+        self.setMinimumWidth(560)
+        self.setModal(True)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 22)
+        root.setSpacing(14)
+
+        title = QLabel("Edit Scheduled Task" if is_edit else "Create a Scheduled Linux Task")
+        title.setObjectName("TitleLabel")
+        subtitle = QLabel("Schedule any shell command, script, or backup directly on your Linux system.")
+        subtitle.setObjectName("SubtitleLabel")
+        root.addWidget(title)
+        root.addWidget(subtitle)
+
+        # Task name
+        root.addWidget(self._section_label("Task name"))
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("e.g., Daily Backup, Clean Downloads, Break Reminder")
+        if job:
+            self.name_input.setText(job.name or "")
+        root.addWidget(self.name_input)
+
+        # Quick schedule presets
+        root.addWidget(self._section_label("When should it run?"))
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(6)
+        self._preset_buttons: list[QPushButton] = []
+        for label, sched in self.PRESETS:
+            btn = GlowButton(label, glow_hex=palette.accent, max_blur=14.0)
+            btn.setObjectName("ChipButton")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, s=sched, b=btn: self._select_preset(s, b))
+            preset_row.addWidget(btn)
+            self._preset_buttons.append(btn)
+        preset_row.addStretch()
+        root.addLayout(preset_row)
+
+        # Friendly interval builder
+        interval_row = QHBoxLayout()
+        interval_row.setSpacing(8)
+        interval_row.addWidget(QLabel("Or repeat every"))
+        self.amount_spin = QSpinBox()
+        self.amount_spin.setRange(1, 999)
+        self.amount_spin.setValue(30)
+        self.amount_spin.setFixedWidth(78)
+        self.amount_spin.valueChanged.connect(self._sync_from_interval)
+        interval_row.addWidget(self.amount_spin)
+
+        self.unit_combo = QComboBox()
+        for label, _ in self.UNIT_MAP:
+            self.unit_combo.addItem(label)
+        self.unit_combo.currentIndexChanged.connect(self._sync_from_interval)
+        interval_row.addWidget(self.unit_combo)
+        interval_row.addStretch()
+        root.addLayout(interval_row)
+
+        # Cron schedule expression + human preview
+        root.addWidget(self._section_label("Cron schedule"))
+        self.schedule_input = QLineEdit()
+        self.schedule_input.setPlaceholderText("*/15 * * * *, 0 9 * * *, or @reboot")
+        self.schedule_input.setText(job.schedule if job and job.schedule else "*/30 * * * *")
+        self.schedule_input.textChanged.connect(self._update_preview)
+        root.addWidget(self.schedule_input)
+
+        self.preview_label = QLabel()
+        self.preview_label.setStyleSheet(f"color: {palette.accent}; font-weight: 600; font-size: 12px;")
+        root.addWidget(self.preview_label)
+
+        # Linux Command / Script
+        cmd_hdr = QHBoxLayout()
+        cmd_hdr.addWidget(self._section_label("Linux command or script to run"))
+        cmd_hdr.addStretch()
+        browse_btn = GlowButton("Browse Script...", glow_hex=palette.accent, max_blur=12.0)
+        browse_btn.setObjectName("CardAction")
+        browse_btn.clicked.connect(self._browse_script)
+        cmd_hdr.addWidget(browse_btn)
+        root.addLayout(cmd_hdr)
+
+        self.command_edit = QPlainTextEdit()
+        self.command_edit.setPlaceholderText("e.g., ~/scripts/backup.sh   or   notify-send 'Hello Linux!'")
+        self.command_edit.setFixedHeight(84)
+        self.command_edit.setStyleSheet('font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 12px;')
+        if job:
+            self.command_edit.setPlainText(job.command or "")
+        root.addWidget(self.command_edit)
+
+        # Quick example chips
+        ex_row = QHBoxLayout()
+        ex_row.setSpacing(6)
+        ex_lbl = QLabel("Examples:")
+        ex_lbl.setObjectName("SubtitleLabel")
+        ex_row.addWidget(ex_lbl)
+        for label, cmd in self.EXAMPLES:
+            eb = GlowButton(label, glow_hex=palette.accent, max_blur=10.0)
+            eb.setObjectName("ChipButton")
+            eb.clicked.connect(lambda checked=False, n=label, c=cmd: self._apply_example(n, c))
+            ex_row.addWidget(eb)
+        ex_row.addStretch()
+        root.addLayout(ex_row)
+
+        # Paused option
+        self.paused_check = QCheckBox("Create paused (do not run automatically yet)")
+        if job and job.status == "paused":
+            self.paused_check.setChecked(True)
+        root.addWidget(self.paused_check)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch()
+        cancel_btn = GlowButton("Cancel", glow_hex=palette.accent, max_blur=12.0)
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = GlowButton("Save Changes" if is_edit else "Create Task", glow_hex=palette.accent, max_blur=22.0)
+        save_btn.setObjectName("PrimaryButton")
+        save_btn.clicked.connect(self._submit)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        root.addLayout(btn_row)
+
+        self._update_preview()
+        self.name_input.setFocus()
+
+    def _section_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-weight: 700; font-size: 12px;")
+        return lbl
+
+    def _select_preset(self, schedule: str, active_btn: QPushButton) -> None:
+        for b in self._preset_buttons:
+            if b is not active_btn:
+                b.setChecked(False)
+        self.schedule_input.setText(schedule)
+
+    def _sync_from_interval(self) -> None:
+        for b in self._preset_buttons:
+            b.setChecked(False)
+        amt = self.amount_spin.value()
+        suffix = self.UNIT_MAP[self.unit_combo.currentIndex()][1]
+        self.schedule_input.setText(cm.normalize_schedule(f"{amt}{suffix}"))
+
+    def _apply_example(self, name: str, cmd: str) -> None:
+        if not self.name_input.text().strip():
+            self.name_input.setText(name)
+        self.command_edit.setPlainText(cmd)
+
+    def _browse_script(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a Linux Script or Executable",
+            str(cm.Path.home()),
+            "Scripts (*.sh *.py *.bash);;All Files (*)",
         )
-        for col, text in zip(
-            self.tree["columns"], ("ID", "Name", "Status", "Schedule", "Next Run")
-        ):
-            self.tree.heading(col, text=text)
-        self.tree.column("id", width=110, anchor=tk.W, minwidth=90)
-        self.tree.column("name", width=200, anchor=tk.W, minwidth=120)
-        self.tree.column("status", width=90, anchor=tk.W, minwidth=70)
-        self.tree.column("schedule", width=150, anchor=tk.W, minwidth=110)
-        self.tree.column("next", width=200, anchor=tk.W, minwidth=160)
-        self.tree.bind("<Map>", lambda e: self._bind_tags())
-        self.tree.bind("<Unmap>", lambda e: self._unbind_tags())
+        if path:
+            if path.endswith(".py"):
+                self.command_edit.setPlainText(f'python3 "{path}"')
+            else:
+                self.command_edit.setPlainText(f'"{path}"')
+            if not self.name_input.text().strip():
+                self.name_input.setText(cm.Path(path).stem.replace("_", " ").replace("-", " ").title())
 
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        tree_frame.pack_propagate(False)
-        tree_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
+    def _update_preview(self) -> None:
+        sched = self.schedule_input.text().strip()
+        self.preview_label.setText(f"⏱  {cm.human_schedule(sched)}")
 
-        # Detail panel
-        detail = ttk.LabelFrame(self, text="Job details", padding=8)
-        detail.pack(fill=tk.X, side=tk.BOTTOM)
-        self.detail_var = tk.StringVar(value="Select a job to edit.")
-        ttk.Label(detail, textvariable=self.detail_var, foreground=SUBTEXT).pack(anchor=tk.W)
+    def _submit(self) -> None:
+        schedule = self.schedule_input.text().strip()
+        command = self.command_edit.toPlainText().strip()
+        if not schedule:
+            QMessageBox.warning(self, "Schedule required", "Please choose or enter a schedule.")
+            return
+        if not command:
+            QMessageBox.warning(self, "Command required", "Please enter a Linux command or choose a script.")
+            return
 
-        # Status bar
-        self.status = ttk.Label(self, text="", anchor=tk.W, foreground=SUBTEXT)
-        self.status.pack(fill=tk.X, side=tk.BOTTOM)
+        self.result_payload = {
+            "name": self.name_input.text().strip(),
+            "schedule": schedule,
+            "command": command,
+            "paused": self.paused_check.isChecked(),
+        }
+        self.accept()
 
-        self.tree.bind("<Double-Button-1>", lambda e: self._edit_dialog())
 
-    def _bind_tags(self) -> None:
-        for st, col in STATUS_COLORS.items():
-            self.tree.tag_configure(st, foreground=col)
+class HistoryDialog(QDialog):
+    def __init__(self, parent: QWidget, palette: ThemePalette, title: str, text: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Logs — {title}")
+        self.resize(700, 460)
 
-    def _unbind_tags(self) -> None:
-        pass
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
 
-    def _btn(self, parent: ttk.Frame, text: str, cmd) -> None:
-        ttk.Button(parent, text=text, command=cmd, width=12).pack(side=tk.LEFT, padx=3, pady=2)
+        hdr = QLabel(f"Execution Logs · {title}")
+        hdr.setObjectName("TitleLabel")
+        layout.addWidget(hdr)
 
-    # ---- actions -----------------------------------------------------------
-    def refresh(self) -> None:
-        self.jobs = cm.list_jobs(include_all=True)
-        self.tree.delete(*self.tree.get_children())
+        viewer = QPlainTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setPlainText(text.strip())
+        viewer.setStyleSheet('font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 12px;')
+        layout.addWidget(viewer, 1)
+
+        btn_row = QHBoxLayout()
+        copy_btn = GlowButton("Copy Logs", glow_hex=palette.accent, max_blur=14.0)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(viewer.toPlainText()))
+        close_btn = GlowButton("Close", glow_hex=palette.accent, max_blur=18.0)
+        close_btn.setObjectName("PrimaryButton")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(copy_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+
+class JobCard(HoverCard):
+    """Premium card representing one native Linux scheduled task."""
+
+    def __init__(
+        self,
+        job: cm.Job,
+        palette: ThemePalette,
+        on_run: Callable[[cm.Job], None],
+        on_toggle_pause: Callable[[cm.Job], None],
+        on_history: Callable[[cm.Job], None],
+        on_edit: Callable[[cm.Job], None],
+        on_remove: Callable[[cm.Job], None],
+    ) -> None:
+        super().__init__(glow_hex=palette.accent)
+        self.setObjectName("JobCard")
+        self.job = job
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 16)
+        outer.setSpacing(10)
+
+        # Header row: status dot + name + schedule + status badge
+        top = QHBoxLayout()
+        top.setSpacing(10)
+
+        status_lower = (job.status or "active").lower()
+        status_color = {
+            "active": palette.success,
+            "paused": palette.warning,
+            "failed": palette.danger,
+        }.get(status_lower, palette.fg_muted)
+
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color: {status_color}; font-size: 14px;")
+        top.addWidget(dot)
+
+        name_lbl = QLabel(job.name or f"Task {job.id}")
+        name_lbl.setStyleSheet("font-size: 15px; font-weight: 700;")
+        top.addWidget(name_lbl)
+
+        sched_pill = QLabel(f"⏱  {cm.human_schedule(job.schedule)}")
+        sched_pill.setStyleSheet(
+            f"background-color: {palette.surface_alt}; color: {palette.fg_muted}; "
+            f"border: 1px solid {palette.border}; border-radius: 9px; "
+            f"padding: 2px 10px; font-size: 11px; font-weight: 600;"
+        )
+        top.addWidget(sched_pill)
+
+        top.addStretch()
+
+        badge = QLabel(status_lower.upper())
+        badge.setStyleSheet(
+            f"background-color: {palette.surface_alt}; color: {status_color}; "
+            f"border: 1px solid {status_color}; border-radius: 10px; "
+            f"padding: 3px 10px; font-size: 11px; font-weight: 700;"
+        )
+        top.addWidget(badge)
+        outer.addLayout(top)
+
+        # Command preview pill
+        cmd_pill = QLabel(f"$  {job.command}")
+        cmd_pill.setObjectName("CmdPill")
+        cmd_pill.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(cmd_pill)
+
+        # Bottom row: next run + hover-glow action buttons
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+
+        next_text = f"Next: {job.next_run}" if job.next_run else f"Cron: {job.schedule}"
+        next_lbl = QLabel(next_text)
+        next_lbl.setStyleSheet(f"color: {palette.fg_muted}; font-size: 12px;")
+        bottom.addWidget(next_lbl)
+        bottom.addStretch()
+
+        run_btn = GlowButton("▶  Run Now", glow_hex=palette.accent, max_blur=18.0)
+        run_btn.setObjectName("RunAction")
+        run_btn.clicked.connect(lambda: on_run(job))
+        bottom.addWidget(run_btn)
+
+        pause_btn = GlowButton(
+            "▶  Resume" if status_lower == "paused" else "⏸  Pause",
+            glow_hex=palette.warning,
+            max_blur=14.0,
+        )
+        pause_btn.setObjectName("CardAction")
+        pause_btn.clicked.connect(lambda: on_toggle_pause(job))
+        bottom.addWidget(pause_btn)
+
+        logs_btn = GlowButton("Logs", glow_hex=palette.accent, max_blur=14.0)
+        logs_btn.setObjectName("CardAction")
+        logs_btn.clicked.connect(lambda: on_history(job))
+        bottom.addWidget(logs_btn)
+
+        edit_btn = GlowButton("Edit", glow_hex=palette.accent, max_blur=14.0)
+        edit_btn.setObjectName("CardAction")
+        edit_btn.clicked.connect(lambda: on_edit(job))
+        bottom.addWidget(edit_btn)
+
+        del_btn = GlowButton("Delete", glow_hex=palette.danger, max_blur=16.0)
+        del_btn.setObjectName("DangerAction")
+        del_btn.clicked.connect(lambda: on_remove(job))
+        bottom.addWidget(del_btn)
+
+        outer.addLayout(bottom)
+
+
+class CronManagerWindow(QMainWindow):
+    def __init__(self, theme_watcher: ThemeWatcher) -> None:
+        super().__init__()
+        self.theme_watcher = theme_watcher
+        self.palette_data: ThemePalette = theme_watcher.palette
+        self.jobs: list[cm.Job] = []
+        self.active_filter: str = "all"
+        self._workers: list[WorkerThread] = []
+        self._glow_buttons: list[GlowButton] = []
+
+        self.setWindowTitle("Cron Manager")
+        self.resize(980, 680)
+        self.setMinimumSize(780, 540)
+
+        self._build_ui()
+        self._bind_shortcuts()
+        self.apply_theme(self.palette_data)
+        self.theme_watcher.theme_changed.connect(self.apply_theme)
+
+        QTimer.singleShot(40, self.refresh_jobs)
+
+    def _make_glow_btn(self, text: str, obj_name: str = "", max_blur: float = 18.0) -> GlowButton:
+        btn = GlowButton(text, glow_hex=self.palette_data.accent, max_blur=max_blur)
+        if obj_name:
+            btn.setObjectName(obj_name)
+        self._glow_buttons.append(btn)
+        return btn
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(24, 20, 24, 18)
+        root.setSpacing(16)
+
+        # Premium Header Card
+        header_card = QFrame()
+        header_card.setObjectName("HeaderCard")
+        header = QHBoxLayout(header_card)
+        header.setContentsMargins(20, 16, 20, 16)
+        header.setSpacing(14)
+
+        logo = QLabel("⏱")
+        logo.setObjectName("LogoBadge")
+        logo.setFixedSize(44, 44)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(logo)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title_lbl = QLabel("Cron Manager")
+        title_lbl.setObjectName("TitleLabel")
+        subtitle_lbl = QLabel(f"Linux task scheduler · {cm.backend_label()}")
+        subtitle_lbl.setObjectName("SubtitleLabel")
+        title_col.addWidget(title_lbl)
+        title_col.addWidget(subtitle_lbl)
+        header.addLayout(title_col)
+
+        header.addStretch()
+
+        self.active_pill = QLabel("0 Active")
+        self.active_pill.setObjectName("StatPill")
+        self.paused_pill = QLabel("0 Paused")
+        self.paused_pill.setObjectName("StatPill")
+        header.addWidget(self.active_pill)
+        header.addWidget(self.paused_pill)
+
+        refresh_btn = self._make_glow_btn("↻  Refresh", max_blur=14.0)
+        refresh_btn.clicked.connect(self.refresh_jobs)
+        header.addWidget(refresh_btn)
+
+        new_btn = self._make_glow_btn("+  New Task", obj_name="PrimaryButton", max_blur=24.0)
+        new_btn.clicked.connect(self.open_create_dialog)
+        header.addWidget(new_btn)
+
+        root.addWidget(header_card)
+
+        # Search + Filter row
+        controls = QHBoxLayout()
+        controls.setSpacing(10)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search tasks by name, command, or schedule... (Ctrl+F)")
+        self.search_input.textChanged.connect(self._render_cards)
+        controls.addWidget(self.search_input, 1)
+
+        self._filter_buttons: dict[str, GlowButton] = {}
+        for key, label in (("all", "All"), ("active", "Active"), ("paused", "Paused")):
+            btn = self._make_glow_btn(label, obj_name="ChipButton", max_blur=14.0)
+            btn.setCheckable(True)
+            btn.setChecked(key == "all")
+            btn.clicked.connect(lambda checked, k=key: self._set_filter(k))
+            controls.addWidget(btn)
+            self._filter_buttons[key] = btn
+
+        root.addLayout(controls)
+
+        # Toast banner
+        self.toast_frame = QFrame()
+        self.toast_frame.setObjectName("ToastBanner")
+        toast_layout = QHBoxLayout(self.toast_frame)
+        toast_layout.setContentsMargins(14, 9, 14, 9)
+        self.toast_label = QLabel("")
+        self.toast_label.setStyleSheet("font-weight: 600;")
+        toast_layout.addWidget(self.toast_label, 1)
+        self.toast_frame.hide()
+        root.addWidget(self.toast_frame)
+
+        # Scrollable cards
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.cards_container = QWidget()
+        self.cards_layout = QVBoxLayout(self.cards_container)
+        self.cards_layout.setContentsMargins(4, 4, 8, 8)
+        self.cards_layout.setSpacing(14)
+        self.cards_layout.addStretch()
+        self.scroll.setWidget(self.cards_container)
+        root.addWidget(self.scroll, 1)
+
+        # Footer
+        footer = QHBoxLayout()
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setObjectName("SubtitleLabel")
+        self.theme_lbl = QLabel("")
+        self.theme_lbl.setObjectName("SubtitleLabel")
+        footer.addWidget(self.status_lbl)
+        footer.addStretch()
+        footer.addWidget(self.theme_lbl)
+        root.addLayout(footer)
+
+    def _bind_shortcuts(self) -> None:
+        QShortcut(QKeySequence("Ctrl+N"), self, self.open_create_dialog)
+        QShortcut(QKeySequence("Ctrl+R"), self, self.refresh_jobs)
+        QShortcut(QKeySequence("F5"), self, self.refresh_jobs)
+        QShortcut(QKeySequence("Ctrl+F"), self, self.search_input.setFocus)
+        QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
+
+    def apply_theme(self, palette: ThemePalette) -> None:
+        self.palette_data = palette
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(build_stylesheet(palette))
+        for btn in self._glow_buttons:
+            btn.update_glow_color(palette.accent)
+        self.theme_lbl.setText(f"{palette.source_name} ({palette.mode}) · {palette.accent}")
+        self._render_cards()
+
+    def _show_toast(self, message: str, duration_ms: int = 3800) -> None:
+        self.toast_label.setText(message)
+        self.toast_frame.show()
+        QTimer.singleShot(duration_ms, self.toast_frame.hide)
+
+    def _set_filter(self, key: str) -> None:
+        self.active_filter = key
+        for k, btn in self._filter_buttons.items():
+            btn.setChecked(k == key)
+        self._render_cards()
+
+    def _run_async(self, status_text: str, fn: Callable, on_ok: Callable, *args, **kwargs) -> None:
+        self.status_lbl.setText(status_text)
+        worker = WorkerThread(fn, *args, **kwargs)
+        self._workers.append(worker)
+
+        def _done(res):
+            self._workers.remove(worker)
+            on_ok(res)
+
+        def _err(msg):
+            self._workers.remove(worker)
+            self.status_lbl.setText("Error")
+            self._show_toast(f"Error: {msg}", 5500)
+
+        worker.succeeded.connect(_done)
+        worker.failed.connect(_err)
+        worker.start()
+
+    def refresh_jobs(self) -> None:
+        def _loaded(jobs: list[cm.Job]) -> None:
+            self.jobs = jobs
+            active_n = sum(1 for j in jobs if (j.status or "").lower() == "active")
+            paused_n = sum(1 for j in jobs if (j.status or "").lower() == "paused")
+            self.active_pill.setText(f"{active_n} Active")
+            self.paused_pill.setText(f"{paused_n} Paused")
+            self.status_lbl.setText(f"{len(jobs)} scheduled Linux task(s)")
+            self._render_cards()
+
+        self._run_async("Loading tasks...", cm.list_jobs, _loaded, include_all=True)
+
+    def _render_cards(self) -> None:
+        while self.cards_layout.count():
+            item = self.cards_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        q = self.search_input.text().strip().lower()
+        filtered = []
         for j in self.jobs:
-            tags = [j.status] if j.status in STATUS_COLORS else []
-            self.tree.insert(
-                "",
-                tk.END,
-                iid=j.id,
-                values=(j.id[:8], j.name or "-", j.status, j.schedule or "-", j.next_run or "-"),
-                tags=tags,
+            st = (j.status or "").lower()
+            if self.active_filter != "all" and st != self.active_filter:
+                continue
+            if q and q not in f"{j.name} {j.command} {j.schedule} {j.status}".lower():
+                continue
+            filtered.append(j)
+
+        if not filtered:
+            empty = QFrame()
+            empty.setObjectName("EmptyCard")
+            el = QVBoxLayout(empty)
+            el.setContentsMargins(36, 48, 36, 48)
+            el.setSpacing(12)
+            el.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            heading = QLabel("No scheduled Linux tasks yet" if not self.jobs else "No matching tasks")
+            heading.setStyleSheet("font-size: 18px; font-weight: 700;")
+            heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            desc = QLabel(
+                "Automate backups, scripts, cleanup commands, or reminders right on your Linux desktop."
+                if not self.jobs
+                else "Try clearing your search or switching the filter."
             )
-        self.status.configure(text=f"{len(self.jobs)} job(s) loaded")
-        self._refresh_detail()
+            desc.setObjectName("SubtitleLabel")
+            desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            desc.setWordWrap(True)
 
-    def _refresh_detail(self) -> None:
-        sel = self.tree.selection()
-        j = self._selected() if sel else None
-        if j:
-            lines = [
-                f"Name:     {j.name or '-'}",
-                f"Status:   {j.status}",
-                f"Schedule: {j.schedule}",
-                f"Repeat:   {j.repeat}",
-                f"Next:     {j.next_run}",
-                f"Deliver:  {j.deliver}",
-            ]
-            self.detail_var.set("\n".join(lines))
-        else:
-            self.detail_var.set("Select a job to edit.")
+            el.addWidget(heading)
+            el.addWidget(desc)
 
-    def _selected(self) -> cm.Job | None:
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        jid = sel[0]
-        for j in self.jobs:
-            if j.id == jid:
-                return j
-        return None
+            if not self.jobs:
+                cta = GlowButton("+  Create First Task", glow_hex=self.palette_data.accent, max_blur=24.0)
+                cta.setObjectName("PrimaryButton")
+                cta.setFixedWidth(195)
+                cta.clicked.connect(self.open_create_dialog)
+                el.addSpacing(8)
+                el.addWidget(cta, alignment=Qt.AlignmentFlag.AlignCenter)
 
-    def _new_dialog(self) -> None:
-        self._form("Create Job", empty_job=True)
-
-    def _edit_dialog(self) -> None:
-        j = self._selected()
-        if not j:
-            messagebox.showinfo("Edit", "Select a job first.")
+            self.cards_layout.addWidget(empty)
+            self.cards_layout.addStretch()
             return
-        self._form("Edit Job", job=j)
 
-    def _form(self, title: str, job: cm.Job | None = None, empty_job: bool = False) -> None:
-        win = tk.Toplevel(self)
-        win.title(title)
-        win.geometry("520x440")
-        win.grab_set()
-        win.configure(bg=BG)
+        for job in filtered:
+            card = JobCard(
+                job=job,
+                palette=self.palette_data,
+                on_run=self.run_job_now,
+                on_toggle_pause=self.toggle_pause_job,
+                on_history=self.show_job_history,
+                on_edit=self.open_edit_dialog,
+                on_remove=self.remove_job,
+            )
+            self.cards_layout.addWidget(card)
+        self.cards_layout.addStretch()
 
-        # --- shared variables ---
-        name_v = tk.StringVar()
-        unit_v = tk.StringVar(value="minutes")
-        amount_v = tk.StringVar(value="30")
-        every_v = tk.StringVar(value="every 30 minutes")
-        cron_v = tk.StringVar(value="")
-        cron_manual = tk.StringVar(value="")
-        paused_v = tk.BooleanVar(value=False)
-        prompt_v = tk.StringVar()
+    def open_create_dialog(self) -> None:
+        dlg = JobFormDialog(self, self.palette_data, job=None)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_payload:
+            p = dlg.result_payload
+            self._run_async(
+                "Creating Linux task...",
+                cm.create_job,
+                lambda _: (self._show_toast("Task created and scheduled!"), self.refresh_jobs()),
+                schedule=p["schedule"],
+                command=p["command"],
+                name=p["name"],
+                paused=p["paused"],
+            )
 
-        if job and not empty_job:
-            name_v.set(job.name or "")
-            every_v.set(job.schedule or "")
-            prompt_v.set(self._extract_prompt(job.raw))
-            cron_v.set("")
-            cron_manual.set("")
+    def open_edit_dialog(self, job: cm.Job) -> None:
+        dlg = JobFormDialog(self, self.palette_data, job=job)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_payload:
+            p = dlg.result_payload
+            self._run_async(
+                "Updating task...",
+                cm.edit_job,
+                lambda _: (self._show_toast("Task updated!"), self.refresh_jobs()),
+                job.id,
+                name=p["name"],
+                schedule=p["schedule"],
+                command=p["command"],
+                paused=p["paused"],
+            )
 
-        def rebuild_hint() -> None:
-            amt = amount_v.get().strip() or "30"
-            u = unit_v.get()
-            every_v.set(f"every {amt} {u}")
-            cron_v.set(self._cron_from_form(amt, u))
+    def run_job_now(self, job: cm.Job) -> None:
+        self._run_async(
+            f"Running {job.name or job.id}...",
+            cm.run_job,
+            lambda out: (self._show_toast(out.strip(), 4500), self.refresh_jobs()),
+            job.id,
+        )
 
-        # Header
-        ttk.Label(win, text=title, foreground=ACCENT if not is_dark else "#93c4ff",
-                  background=BG, font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky=tk.W, pady=(10, 8))
+    def toggle_pause_job(self, job: cm.Job) -> None:
+        is_paused = (job.status or "").lower() == "paused"
+        fn = cm.resume_job if is_paused else cm.pause_job
+        verb = "Resuming" if is_paused else "Pausing"
+        self._run_async(
+            f"{verb} {job.name or job.id}...",
+            fn,
+            lambda out: (self._show_toast(out.strip()), self.refresh_jobs()),
+            job.id,
+        )
 
-        # Friendly form
-        ttk.Label(win, text="What do you want it to do?", anchor=tk.W).grid(
-            row=1, column=0, sticky=tk.W, pady=(2, 2))
-        ttk.Entry(win, textvariable=name_v).grid(
-            row=1, column=1, sticky=tk.EW, pady=2, padx=(0, 6))
-        ttk.Label(win, text="(optional name)", foreground=SUBTEXT).grid(
-            row=2, column=1, sticky=tk.W)
+    def show_job_history(self, job: cm.Job) -> None:
+        def _open(out: str) -> None:
+            self.status_lbl.setText(f"{len(self.jobs)} scheduled Linux task(s)")
+            HistoryDialog(self, self.palette_data, job.name or job.id, out).exec()
 
-        ttk.Label(win, text="How often?", anchor=tk.W).grid(
-            row=3, column=0, sticky=tk.W, pady=(8, 2))
+        self._run_async("Loading logs...", cm.history, _open, job.id)
 
-        frm = ttk.Frame(win)
-        frm.grid(row=3, column=1, sticky=tk.EW, pady=2)
-        ttk.Label(win, text="Repeat every").grid(row=3, column=0, sticky=tk.W)
-        amt_entry = ttk.Entry(frm, textvariable=amount_v, width=5)
-        amt_entry.grid(row=0, column=0, padx=(0, 6))
-        unit_dd = ttk.Combobox(frm, values=["minutes", "hours", "days", "weeks"],
-                                textvariable=unit_v, width=8, state="readonly")
-        unit_dd.grid(row=0, column=1)
-        unit_dd.bind("<<ComboboxChanged>>", lambda e: rebuild_hint())
-
-        # Preview of the schedule string
-        ttk.Label(win, text="Schedule preview:", anchor=tk.W).grid(
-            row=4, column=0, sticky=tk.W, pady=(6, 2))
-        ttk.Entry(win, textvariable=every_v, state="readonly").grid(
-            row=4, column=1, sticky=tk.EW, pady=2)
-
-        # Optional custom cron
-        ttk.Label(win, text="Custom cron (optional, e.g. '0 9 * * *'):", anchor=tk.W).grid(
-            row=5, column=0, sticky=tk.W, pady=(6, 2))
-        ttk.Entry(win, textvariable=cron_manual).grid(
-            row=5, column=1, sticky=tk.EW, pady=2)
-
-        # Prompt / task
-        ttk.Label(win, text="Task / prompt:", anchor=tk.W).grid(
-            row=6, column=0, sticky=tk.W, pady=(6, 2))
-        txt = scrolledtext.ScrolledText(win, width=36, height=4)
-        txt.grid(row=6, column=1, sticky=tk.NSEW, pady=2)
-        txt.insert(tk.END, prompt_v.get())
-
-        # Paused checkbox
-        ttk.Checkbutton(win, text="Create paused", variable=paused_v).grid(
-            row=7, column=0, columnspan=2, sticky=tk.W, pady=(6, 2))
-
-        def build_schedule() -> str:
-            # Prefer manual cron if entered
-            if cron_manual.get().strip():
-                return cron_manual.get().strip()
-            amt = amount_v.get().strip() or "30"
-            u = unit_v.get()
-            return f"every {amt} {u}"
-
-        def ok() -> None:
-            schedule = build_schedule()
-            if not schedule:
-                messagebox.showwarning("Input", "Please set how often.")
-                return
-            data = {
-                "name": name_v.get().strip(),
-                "schedule": schedule,
-                "repeat": None,
-                "paused": paused_v.get(),
-            }
-            try:
-                if empty_job:
-                    prompt = txt.get("1.0", tk.END).strip()
-                    cm.create_job(schedule=schedule, prompt=prompt, **data)
-                else:
-                    cm.edit_job(job.id, **data)
-                messagebox.showinfo("OK", "Saved.")
-                win.destroy()
-                self.refresh()
-            except RuntimeError as e:
-                messagebox.showerror("Error", str(e))
-
-        btns = ttk.Frame(win)
-        btns.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=(8, 6))
-        ttk.Button(btns, text="Cancel", width=10, command=win.destroy).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btns, text="Save", width=10, command=ok).pack(side=tk.RIGHT)
-
-        win.grid_columnconfigure(1, weight=1)
-        win.grid_rowconfigure(6, weight=1)
-        win.lift()
-        win.focus_set()
-        win.attributes('-topmost', True)
-
-    @staticmethod
-    def _cron_from_form(amt: str, unit: str) -> str:
-        """Very small helper to preview a cron-ish string (informational)."""
-        if unit == "minutes":
-            return f"*/{int(amt) if amt.isdigit() else amt} * * * *"
-        if unit == "hours":
-            h = int(amt) if amt.isdigit() else amt
-            return f"0 */{h if isinstance(h, int) else h} * * *"
-        if unit == "days":
-            return f"0 0 */{amt if amt.isdigit() else amt} * *"
-        return f"every {amt} {unit}"
-
-    @staticmethod
-    def _parse_repeat(repeat: str) -> str:
-        if not repeat:
-            return ""
-        if "0/" in repeat:
-            return repeat.split("0/", 1)[1]
-        return ""
-
-    @staticmethod
-    def _extract_prompt(raw: str) -> str:
-        if not raw:
-            return ""
-        for line in raw.splitlines():
-            if "Prompt" in line or "prompt" in line:
-                return line
-        return ""
-
-    def run_now(self) -> None:
-        j = self._selected()
-        if not j:
-            messagebox.showinfo("Run", "Select a job first.")
+    def remove_job(self, job: cm.Job) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Delete Task",
+            f"Remove scheduled task '{job.name or job.id}' from Linux?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
-        try:
-            out = cm.run_job(j.id)
-            messagebox.showinfo("Run", out.strip())
-            self.refresh()
-        except RuntimeError as e:
-            messagebox.showerror("Error", str(e))
-
-    def toggle_pause(self) -> None:
-        j = self._selected()
-        if not j:
-            messagebox.showinfo("Pause", "Select a job first.")
-            return
-        try:
-            out = cm.resume_job(j.id) if j.status == "paused" else cm.pause_job(j.id)
-            messagebox.showinfo("Status", out.strip())
-            self.refresh()
-        except RuntimeError as e:
-            messagebox.showerror("Error", str(e))
-
-    def remove_selected(self) -> None:
-        j = self._selected()
-        if not j:
-            messagebox.showinfo("Remove", "Select a job first.")
-            return
-        if not messagebox.askyesno("Confirm", f"Remove job {j.id}?"):
-            return
-        try:
-            out = cm.remove_job(j.id)
-            messagebox.showinfo("Removed", out.strip())
-            self.refresh()
-        except RuntimeError as e:
-            messagebox.showerror("Error", str(e))
-
-    def show_history(self) -> None:
-        j = self._selected()
-        if not j:
-            messagebox.showinfo("History", "Select a job first.")
-            return
-        try:
-            out = cm.history(j.id)
-            box = tk.Toplevel(self)
-            box.title(f"History - {j.name or j.id}")
-            t = scrolledtext.ScrolledText(box, width=70, height=20)
-            t.pack(fill=tk.BOTH, expand=True)
-            t.insert(tk.END, out)
-        except RuntimeError as e:
-            messagebox.showerror("Error", str(e))
+        self._run_async(
+            "Deleting task...",
+            cm.remove_job,
+            lambda _: (self._show_toast("Task deleted."), self.refresh_jobs()),
+            job.id,
+        )
 
 
 def main() -> None:
-    CronManagerApp().mainloop()
+    app = QApplication(sys.argv)
+    app.setApplicationName("Cron Manager")
+    app.setDesktopFileName("cronmanager")
+
+    watcher = ThemeWatcher(app)
+    window = CronManagerWindow(watcher)
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

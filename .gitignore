@@ -1,2 +1,9 @@
 __pycache__/
-*.pyc
+*.py[cod]
+*.db
+*.sqlite3
+.venv/
+venv/
+*.log
+*.png
+0,0,520,440

@@ -1,56 +1,34 @@
 # Cron Manager
 
-A small, simple GUI to browse, create, edit and delete [Hermes](https://hermes-agent.nousresearch.com) cron jobs. Plain Python + `tkinter`, wraps the `hermes cron` CLI.
+A sleek, human-friendly **native Linux scheduled task manager** built with **Python + Qt 6 (`PySide6`)** that adapts **live** to your active **Omarchy** desktop theme.
 
-## Requirements
-
-- Python 3.10+
-- `hermes` CLI available on `PATH`
-
-## Run
-
-```bash
-python3 gui.py
-```
+[![License: MIT](https://img.shields.io/badge/License-MIT-7376b7.svg)](LICENSE)
+[![Buy Me a Coffee](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/aurorauap)
 
 ## Features
 
-- **List** all cron jobs (name, status, schedule, next run)
-- **Create** a new job (schedule + prompt + optional name/repeat)
-- **Edit** an existing job (name, schedule, pause/resume)
-- **Run now**, **Pause/Resume**, **Remove** actions
-- **History** view for a job
-- Refresh on demand
+- **Native Linux Scheduling:** Automatically manages real Linux **`systemd --user` timers** (works out of the box on Arch/Omarchy, Ubuntu, Debian, Fedora, openSUSE — no `sudo` or `cronie` required) with automatic **`crontab`** fallback on non-systemd setups.
+- **Live Omarchy Theme Sync:** Reads `~/.local/state/omarchy/current/theme/colors.toml` and Hyprland's `decoration:rounding` in real time — switching Omarchy themes immediately updates colors, gradients, and hover glow effects.
+- **Human-Friendly UI:**
+  - Card-based task list with status badges, human-readable schedules, monospace command pills, and real `Next:` trigger times.
+  - Inline quick actions (**Run Now**, **Pause / Resume**, **Logs**, **Edit**, **Delete**) with smooth animated accent glow on hover.
+  - Visual task creator with 1-click schedule presets (`Every 5 min`, `Every 15 min`, `Every hour`, `Daily 09:00`, `Mondays 09:00`, `At Startup`), friendly interval builder, script file browser, and starter command examples.
+  - Live search (`Ctrl+F`), status filters (`All`, `Active`, `Paused`), keyboard shortcuts (`Ctrl+N`, `Ctrl+R`, `Ctrl+Q`), and execution log viewer (`journalctl` + manual run history).
 
-## Usage
+## Requirements
 
-1. Select a job in the list.
-2. Use the toolbar:
-   - **New Job** — create a job (schedule required; prompt optional)
-   - **Edit** — change name / schedule / pause state
-   - **Run Now** — trigger the job immediately
-   - **Pause/Resume** — toggle the job's active state
-   - **History** — see durable execution attempts for a job
-   - **Remove** — delete the job
+- Linux (Wayland or X11)
+- Python 3.11+
+- `PySide6` (`sudo pacman -S pyside6` on Arch/Omarchy, or `pip install PySide6`)
 
-Schedule formats: `30m`, `every 2h`, or a cron expression like `0 9 * * *`.
-
-## Layout
-
-```
-cronmanager/
-  cronmanager.py   # core library (CLI wrapper + output parsing)
-  gui.py           # tkinter front-end
-  README.md
-  LICENSE
-```
-
-## Testing the core
+## Quick Start
 
 ```bash
-python3 -c "import cronmanager as cm; print(cm.list_jobs())"
+git clone https://github.com/ilievi187/cronmanager.git
+cd cronmanager
+./run.sh
 ```
 
 ## License
 
-MIT — see `LICENSE`.
+Licensed under the [MIT License](LICENSE).
