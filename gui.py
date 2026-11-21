@@ -10,8 +10,8 @@ from __future__ import annotations
 import sys
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QUrl, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -613,13 +613,20 @@ class CronManagerWindow(QMainWindow):
 
         # Footer
         footer = QHBoxLayout()
+        footer.setSpacing(10)
         self.status_lbl = QLabel("Ready")
         self.status_lbl.setObjectName("SubtitleLabel")
         self.theme_lbl = QLabel("")
         self.theme_lbl.setObjectName("SubtitleLabel")
+        support_btn = self._make_glow_btn("☕  Support", obj_name="ChipButton", max_blur=14.0)
+        support_btn.setToolTip("Support development on Buy Me a Coffee (voluntary)")
+        support_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://buymeacoffee.com/aurorauap"))
+        )
         footer.addWidget(self.status_lbl)
         footer.addStretch()
         footer.addWidget(self.theme_lbl)
+        footer.addWidget(support_btn)
         root.addLayout(footer)
 
     def _bind_shortcuts(self) -> None:
