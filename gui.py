@@ -212,7 +212,7 @@ class CronManagerApp(tk.Tk):
         if not j:
             messagebox.showinfo("Remove", "Select a job first.")
             return
-        if not messagebox.askyescancel("Confirm", f"Remove job {j.id}?"):
+        if not messagebox.askyesno("Confirm", f"Remove job {j.id}?"):
             return
         try:
             out = cm.remove_job(j.id)
