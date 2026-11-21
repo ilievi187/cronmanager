@@ -6,36 +6,87 @@ Run:  python3 gui.py
 
 Features:
   - List all cron jobs (name, status, schedule, next run)
-  - Create a new job (schedule + prompt + optional name/repeat)
+  - Create a new job (friendly form: how often, what to do)
   - Edit an existing job (name / schedule / pause-resume)
   - Run now / Pause / Resume / Remove actions
   - View run history
   - Refresh on demand
+  - Auto-adapts to dark/light system theme
 
 Uses the `cronmanager` library (hermes cron CLI wrapper) from the same folder.
 """
 
 from __future__ import annotations
 
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 
 import cronmanager as cm
 
-# ---- theme / accent colours -------------------------------------------------
-ACCENT = "#2d6cdf"        # button / header accent
+
+# ---- theme detection --------------------------------------------------------
+def detect_theme() -> str:
+    """Return 'dark' or 'light' based on the desktop theme settings."""
+    try:
+        out = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            v = out.stdout.strip().strip("'")
+            if "dark" in v:
+                return "dark"
+            if "light" in v:
+                return "light"
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    # Fallback: read GTK settings for dark/light theme names.
+    try:
+        cfg = subprocess.run(
+            ["bash", "-c",
+             "cat ~/.config/gtk-3.0/settings.ini 2>/dev/null; "
+             "cat ~/.config/gtk-4.0/settings.ini 2>/dev/null"],
+            capture_output=True, text=True, timeout=5,
+        )
+        txt = (cfg.stdout + cfg.stderr).lower()
+        if "dark" in txt or "black" in txt or "adapta" in txt:
+            return "dark"
+    except subprocess.SubprocessError:
+        pass
+
+    return "light"
+
+
+THEME = detect_theme()
+is_dark = THEME == "dark"
+
+# ---- colours per theme ------------------------------------------------------
+if is_dark:
+    BG = "#242424"
+    CARD = "#2f2f2f"
+    HEADER_BG = "#1c1c1c"
+    TEXT = "#f0f0f0"
+    SUBTEXT = "#b0b0b0"
+    BORDER = "#3a3a3a"
+else:
+    BG = "#f5f6f8"
+    CARD = "#ffffff"
+    HEADER_BG = "#2d6cdf"
+    TEXT = "#1a1a1a"
+    SUBTEXT = "#555555"
+    BORDER = "#d0d0d0"
+
 ACCENT_TEXT = "#ffffff"
-BG = "#f4f5f7"
-HEADER_BG = "#1f2a44"
-ROW_ALT = "#ffffff"
 STATUS_COLORS = {
-    "active": "#1b7e3b",
-    "paused": "#c8860b",
-    "completed": "#6b7280",
-    "running": "#2d6cdf",
-    "failed": "#b42319",
-    "missed": "#933646",
-    "cancelled": "#6b7280",
+    "active": "#3fb25f",
+    "paused": "#e0a400",
+    "running": "#4a86e8",
+    "completed": "#808080",
+    "failed": "#d43b2f",
+    "missed": "#a05195",
+    "cancelled": "#808080",
 }
 
 
@@ -55,7 +106,6 @@ class CronManagerApp(tk.Tk):
     # ---- theming -----------------------------------------------------------
     def _configure_theme(self) -> None:
         style = ttk.Style(self)
-        # Pick a native theme if available, else rely on defaults.
         available = set(style.themes()) if hasattr(style, "themes") else set()
         for candidate in ("arc", "breeze", "clam", "highwind", "default"):
             if candidate in available:
@@ -72,6 +122,7 @@ class CronManagerApp(tk.Tk):
             header,
             text="  🗓  Cron Manager",
             foreground=ACCENT_TEXT,
+            background=HEADER_BG,
             font=("Segoe UI", 13, "bold"),
             anchor="w",
         ).pack(fill=tk.BOTH, side=tk.LEFT)
@@ -116,20 +167,17 @@ class CronManagerApp(tk.Tk):
         detail = ttk.LabelFrame(self, text="Job details", padding=8)
         detail.pack(fill=tk.X, side=tk.BOTTOM)
         self.detail_var = tk.StringVar(value="Select a job to edit.")
-        ttk.Label(detail, textvariable=self.detail_var, foreground="#555555").pack(anchor=tk.W)
+        ttk.Label(detail, textvariable=self.detail_var, foreground=SUBTEXT).pack(anchor=tk.W)
 
         # Status bar
-        self.status = ttk.Label(self, text="", anchor=tk.W, foreground="#555555")
+        self.status = ttk.Label(self, text="", anchor=tk.W, foreground=SUBTEXT)
         self.status.pack(fill=tk.X, side=tk.BOTTOM)
 
         self.tree.bind("<Double-Button-1>", lambda e: self._edit_dialog())
 
     def _bind_tags(self) -> None:
-        self.tree.tag_configure("active", foreground=STATUS_COLORS.get("active"))
-        self.tree.tag_configure("paused", foreground=STATUS_COLORS.get("paused"))
-        self.tree.tag_configure("running", foreground=STATUS_COLORS.get("running"))
-        self.tree.tag_configure("completed", foreground=STATUS_COLORS.get("completed"))
-        self.tree.tag_configure("failed", foreground=STATUS_COLORS.get("failed"))
+        for st, col in STATUS_COLORS.items():
+            self.tree.tag_configure(st, foreground=col)
 
     def _unbind_tags(self) -> None:
         pass
@@ -192,54 +240,99 @@ class CronManagerApp(tk.Tk):
     def _form(self, title: str, job: cm.Job | None = None, empty_job: bool = False) -> None:
         win = tk.Toplevel(self)
         win.title(title)
-        win.geometry("480x380")
-        win.translucent = False
-        win.modelodal = True
+        win.geometry("520x440")
+        win.grab_set()
+        win.configure(bg=BG)
+
+        # --- shared variables ---
+        name_v = tk.StringVar()
+        unit_v = tk.StringVar(value="minutes")
+        amount_v = tk.StringVar(value="30")
+        every_v = tk.StringVar(value="every 30 minutes")
+        cron_v = tk.StringVar(value="")
+        cron_manual = tk.StringVar(value="")
+        paused_v = tk.BooleanVar(value=False)
+        prompt_v = tk.StringVar()
 
         if job and not empty_job:
-            name_v = tk.StringVar(value=job.name or "")
-            sched_v = tk.StringVar(value=job.schedule)
-            repeat_v = tk.StringVar(value=self._parse_repeat(job.repeat))
-            paused_v = tk.BooleanVar(value=(job.status == "paused"))
-            prompt_v = tk.StringVar(value=self._extract_prompt(job.raw))
-        else:
-            name_v = tk.StringVar(value="")
-            sched_v = tk.StringVar(value="")
-            repeat_v = tk.StringVar(value="")
-            paused_v = tk.BooleanVar(value=False)
-            prompt_v = tk.StringVar(value="")
+            name_v.set(job.name or "")
+            every_v.set(job.schedule or "")
+            prompt_v.set(self._extract_prompt(job.raw))
+            cron_v.set("")
+            cron_manual.set("")
 
-        ttk.Label(win, text=title, foreground=ACCENT, font=("Segoe UI", 11, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky=tk.W, pady=(8, 6)
-        )
+        def rebuild_hint() -> None:
+            amt = amount_v.get().strip() or "30"
+            u = unit_v.get()
+            every_v.set(f"every {amt} {u}")
+            cron_v.set(self._cron_from_form(amt, u))
 
-        ttk.Label(win, text="Name (optional):").grid(row=1, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(win, textvariable=name_v).grid(row=1, column=1, sticky=tk.EW, pady=3)
+        # Header
+        ttk.Label(win, text=title, foreground=ACCENT if not is_dark else "#93c4ff",
+                  background=BG, font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=(10, 8))
 
-        ttk.Label(win, text="Schedule (e.g. 30m / every 2h / 0 9 * * *):").grid(
-            row=2, column=0, sticky=tk.W, pady=3
-        )
-        ttk.Entry(win, textvariable=sched_v).grid(row=2, column=1, sticky=tk.EW, pady=3)
+        # Friendly form
+        ttk.Label(win, text="What do you want it to do?", anchor=tk.W).grid(
+            row=1, column=0, sticky=tk.W, pady=(2, 2))
+        ttk.Entry(win, textvariable=name_v).grid(
+            row=1, column=1, sticky=tk.EW, pady=2, padx=(0, 6))
+        ttk.Label(win, text="(optional name)", foreground=SUBTEXT).grid(
+            row=2, column=1, sticky=tk.W)
 
-        ttk.Label(win, text="Repeat count (optional):").grid(row=3, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(win, textvariable=repeat_v).grid(row=3, column=1, sticky=tk.EW, pady=3)
+        ttk.Label(win, text="How often?", anchor=tk.W).grid(
+            row=3, column=0, sticky=tk.W, pady=(8, 2))
 
-        ttk.Label(win, text="Prompt / task:").grid(row=4, column=0, sticky=tk.NW, pady=3)
-        txt = scrolledtext.ScrolledText(win, width=36, height=5)
-        txt.grid(row=4, column=1, sticky=tk.NSEW, pady=3)
+        frm = ttk.Frame(win)
+        frm.grid(row=3, column=1, sticky=tk.EW, pady=2)
+        ttk.Label(win, text="Repeat every").grid(row=3, column=0, sticky=tk.W)
+        amt_entry = ttk.Entry(frm, textvariable=amount_v, width=5)
+        amt_entry.grid(row=0, column=0, padx=(0, 6))
+        unit_dd = ttk.Combobox(frm, values=["minutes", "hours", "days", "weeks"],
+                                textvariable=unit_v, width=8, state="readonly")
+        unit_dd.grid(row=0, column=1)
+        unit_dd.bind("<<ComboboxChanged>>", lambda e: rebuild_hint())
+
+        # Preview of the schedule string
+        ttk.Label(win, text="Schedule preview:", anchor=tk.W).grid(
+            row=4, column=0, sticky=tk.W, pady=(6, 2))
+        ttk.Entry(win, textvariable=every_v, state="readonly").grid(
+            row=4, column=1, sticky=tk.EW, pady=2)
+
+        # Optional custom cron
+        ttk.Label(win, text="Custom cron (optional, e.g. '0 9 * * *'):", anchor=tk.W).grid(
+            row=5, column=0, sticky=tk.W, pady=(6, 2))
+        ttk.Entry(win, textvariable=cron_manual).grid(
+            row=5, column=1, sticky=tk.EW, pady=2)
+
+        # Prompt / task
+        ttk.Label(win, text="Task / prompt:", anchor=tk.W).grid(
+            row=6, column=0, sticky=tk.W, pady=(6, 2))
+        txt = scrolledtext.ScrolledText(win, width=36, height=4)
+        txt.grid(row=6, column=1, sticky=tk.NSEW, pady=2)
         txt.insert(tk.END, prompt_v.get())
 
-        ttk.Checkbutton(win, text="Paused", variable=paused_v).grid(row=5, column=0, sticky=tk.W, pady=3)
+        # Paused checkbox
+        ttk.Checkbutton(win, text="Create paused", variable=paused_v).grid(
+            row=7, column=0, columnspan=2, sticky=tk.W, pady=(6, 2))
+
+        def build_schedule() -> str:
+            # Prefer manual cron if entered
+            if cron_manual.get().strip():
+                return cron_manual.get().strip()
+            amt = amount_v.get().strip() or "30"
+            u = unit_v.get()
+            return f"every {amt} {u}"
 
         def ok() -> None:
-            schedule = sched_v.get().strip()
+            schedule = build_schedule()
             if not schedule:
-                messagebox.showwarning("Input", "Schedule is required.")
+                messagebox.showwarning("Input", "Please set how often.")
                 return
             data = {
                 "name": name_v.get().strip(),
                 "schedule": schedule,
-                "repeat": int(repeat_v.get()) if repeat_v.get().strip() else None,
+                "repeat": None,
                 "paused": paused_v.get(),
             }
             try:
@@ -255,13 +348,27 @@ class CronManagerApp(tk.Tk):
                 messagebox.showerror("Error", str(e))
 
         btns = ttk.Frame(win)
-        btns.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
+        btns.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=(8, 6))
         ttk.Button(btns, text="Cancel", width=10, command=win.destroy).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btns, text="Save", width=10, command=ok).pack(side=tk.RIGHT)
 
         win.grid_columnconfigure(1, weight=1)
-        win.grid_rowconfigure(4, weight=1)
-        win.grab_set()
+        win.grid_rowconfigure(6, weight=1)
+        win.lift()
+        win.focus_set()
+        win.attributes('-topmost', True)
+
+    @staticmethod
+    def _cron_from_form(amt: str, unit: str) -> str:
+        """Very small helper to preview a cron-ish string (informational)."""
+        if unit == "minutes":
+            return f"*/{int(amt) if amt.isdigit() else amt} * * * *"
+        if unit == "hours":
+            h = int(amt) if amt.isdigit() else amt
+            return f"0 */{h if isinstance(h, int) else h} * * *"
+        if unit == "days":
+            return f"0 0 */{amt if amt.isdigit() else amt} * *"
+        return f"every {amt} {unit}"
 
     @staticmethod
     def _parse_repeat(repeat: str) -> str:
